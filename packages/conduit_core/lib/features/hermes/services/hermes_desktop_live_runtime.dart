@@ -42,6 +42,13 @@ extension _HermesDesktopLiveRuntime on HermesDesktopApiService {
       await _rpc.disconnect();
       return;
     }
+    // Advertise server_requests capability to Hermes so interactive requests (clarify, sudo, secret) are delivered.
+    unawaited(
+      _rpc.request<Object?>(
+        'client.capabilities',
+        params: {'server_requests': true},
+      ).catchError((_) => null),
+    );
     _stateSubscription ??= _rpc.events.listen((event) {
       final startedBuffering = _eventBuffer.add(event);
       if (event.type == 'session.info') {
@@ -67,7 +74,8 @@ extension _HermesDesktopLiveRuntime on HermesDesktopApiService {
           event.type == 'clarify.expire' ||
           event.type == 'sudo.expire' ||
           event.type == 'secret.expire' ||
-          event.type == 'mcp.setup.expire') {
+          event.type == 'mcp.setup.expire' ||
+          event.type == 'request.cancel') {
         unawaited(_resolvePendingDecisionEvent(event));
       }
       if (startedBuffering &&

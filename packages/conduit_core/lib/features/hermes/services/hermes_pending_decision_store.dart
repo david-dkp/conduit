@@ -32,6 +32,7 @@ final class HermesPendingDesktopDecision {
     this.multiSelect = false,
     this.profile,
     this.connectionId,
+    this.qid,
   });
 
   final String origin;
@@ -45,6 +46,7 @@ final class HermesPendingDesktopDecision {
   final String? mcpAction;
   final List<String> choices;
   final bool multiSelect;
+  final String? qid;
 
   /// Profile that owns the session, when it is not the connection's own (a Bot
   /// Mode chat). Persisted because the in-memory session→profile map is empty
@@ -88,6 +90,7 @@ final class HermesPendingDesktopDecision {
     if (multiSelect) 'multi_select': true,
     if (profile != null) 'profile': profile,
     if (connectionId != null) 'connection_id': connectionId,
+    if (qid != null) 'qid': qid,
   });
 
   static HermesPendingDesktopDecision? fromStorage(String source) {
@@ -152,6 +155,7 @@ final class HermesPendingDesktopDecision {
           final String id when HermesConnectionProfile.isValidId(id) => id,
           _ => null,
         },
+        qid: value['qid']?.toString(),
       );
     } catch (_) {
       return null;
@@ -184,6 +188,7 @@ final class HermesPendingDecisionStore {
     Iterable<String> sensitiveValues = const <String>[],
     String? profile,
     String? connectionId,
+    String? qid,
   }) => _serialize(() async {
     final stored = validateHermesOpaqueIdentifier(storedSessionId);
     final runtime = validateHermesOpaqueIdentifier(runtimeId);
@@ -245,6 +250,7 @@ final class HermesPendingDecisionStore {
           (sanitizedChoices.isEmpty
               ? previous?.multiSelect ?? multiSelect
               : multiSelect),
+      qid: qid ?? previous?.qid,
     );
     records
       ..removeWhere(

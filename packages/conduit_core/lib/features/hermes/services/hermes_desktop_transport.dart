@@ -235,6 +235,32 @@ final class HermesDesktopRpcClient {
     return completer.future.then((value) => value as T);
   }
 
+  /// Sends a direct JSON-RPC 2.0 response frame for an incoming server-to-client request.
+  void respond(
+    Object id, {
+    Map<String, dynamic>? result,
+    Map<String, dynamic>? error,
+  }) {
+    final channel = _channel;
+    if (channel == null) return;
+    try {
+      final frame = <String, dynamic>{
+        'jsonrpc': '2.0',
+        'id': id,
+        if (result != null) 'result': result,
+        if (error != null) 'error': error,
+        if (result == null && error == null) 'result': <String, dynamic>{},
+      };
+      channel.sink.add(jsonEncode(frame));
+    } catch (error) {
+      DebugLogger.warning(
+        'respond-failed',
+        scope: 'hermes/desktop/ws',
+        data: {'error': error.toString()},
+      );
+    }
+  }
+
   void _handleFrame(
     Object? raw,
     WebSocketChannel channel,
@@ -309,15 +335,56 @@ final class HermesDesktopRpcClient {
         return;
       }
 
-      // Desktop-only host requests must never reach mobile platform features.
+      // Handle server-to-client requests (clarify, sudo, secret, approval)
       if (frame['method'] is String && frame['id'] != null) {
+        final method = frame['method'] as String;
+        final id = frame['id']?.toString();
+        final params = frame['params'] is Map
+            ? Map<String, dynamic>.from(frame['params'] as Map)
+            : <String, dynamic>{};
+        final sessionId = params['session_id']?.toString();
+
+        if (id != null &&
+            (method == 'clarify' ||
+                method == 'sudo' ||
+                method == 'secret' ||
+                method == 'approval')) {
+          final payload = Map<String, dynamic>.from(params);
+          payload['id'] = id;
+          payload['request_id'] = id;
+
+          if (method == 'clarify' &&
+              payload['questions'] is List &&
+              (payload['questions'] as List).isNotEmpty) {
+            final questions =
+                (payload['questions'] as List).whereType<Map>().toList();
+            if (questions.isNotEmpty) {
+              final firstQ = questions.first;
+              payload['question'] ??= firstQ['question'];
+              payload['choices'] ??= firstQ['choices'];
+              payload['multi_select'] ??= firstQ['multi_select'];
+              payload['qid'] ??= firstQ['qid'];
+            }
+          }
+
+          _events.add(
+            HermesDesktopEvent(
+              type: '$method.request',
+              payload: payload,
+              sessionId: sessionId,
+            ),
+          );
+          return;
+        }
+
+        // Desktop-only host requests must never reach mobile platform features.
         channel.sink.add(
           jsonEncode({
             'jsonrpc': '2.0',
             'id': frame['id'],
             'error': {
               'code': -32601,
-              'message': 'Method not supported on mobile',
+              'message': 'Method not supported on mobile: $method',
             },
           }),
         );

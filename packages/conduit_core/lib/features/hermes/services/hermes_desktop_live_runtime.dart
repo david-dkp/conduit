@@ -43,12 +43,7 @@ extension _HermesDesktopLiveRuntime on HermesDesktopApiService {
       return;
     }
     // Advertise server_requests capability to Hermes so interactive requests (clarify, sudo, secret) are delivered.
-    unawaited(
-      _rpc.request<Object?>(
-        'client.capabilities',
-        params: {'server_requests': true},
-      ).catchError((_) => null),
-    );
+    await _rpc.advertiseCapabilities();
     _stateSubscription ??= _rpc.events.listen((event) {
       final startedBuffering = _eventBuffer.add(event);
       if (event.type == 'session.info') {

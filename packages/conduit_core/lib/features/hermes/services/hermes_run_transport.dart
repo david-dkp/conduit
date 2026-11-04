@@ -1400,6 +1400,10 @@ void _handleEvent(
         );
         break;
       }
+      final safeStoredSessionId = _validatedHermesOpaqueIdentifier(
+        storedSessionId,
+        sensitiveValues: sensitiveValues,
+      );
       final safePrompt = prompt == null
           ? null
           : _sanitizeHermesApprovalSummary(
@@ -1415,6 +1419,7 @@ void _handleEvent(
           'kind': kind.name,
           'requestId': safeRequestId,
           'runtimeId': safeRuntimeId,
+          'storedSessionId': ?safeStoredSessionId,
           'prompt': ?safePrompt,
           if (kind == HermesDecisionKind.clarification) ...{
             if (raw['choices'] is List)

@@ -200,6 +200,7 @@ final class HermesDesktopRpcClient {
     String method, {
     Map<String, dynamic> params = const {},
     Duration? timeout,
+    bool includeDefaultParams = true,
   }) {
     final channel = _channel;
     if (!_ready || channel == null) {
@@ -225,7 +226,10 @@ final class HermesDesktopRpcClient {
           'jsonrpc': '2.0',
           'id': id,
           'method': method,
-          'params': {..._defaultParams, ...params},
+          'params': {
+            if (includeDefaultParams) ..._defaultParams,
+            ...params,
+          },
         }),
       );
     } catch (error, stackTrace) {
@@ -233,6 +237,24 @@ final class HermesDesktopRpcClient {
       completer.completeError(error, stackTrace);
     }
     return completer.future.then((value) => value as T);
+  }
+
+  /// Advertises client capabilities (e.g. server_requests: true) without default params like profile.
+  Future<void> advertiseCapabilities({bool serverRequests = true}) async {
+    try {
+      await request<Object?>(
+        'client.capabilities',
+        params: {'server_requests': serverRequests},
+        includeDefaultParams: false,
+        timeout: const Duration(seconds: 5),
+      );
+    } catch (error) {
+      DebugLogger.warning(
+        'client-capabilities-failed',
+        scope: 'hermes/desktop/ws',
+        data: {'error': error.toString()},
+      );
+    }
   }
 
   /// Sends a direct JSON-RPC 2.0 response frame for an incoming server-to-client request.

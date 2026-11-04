@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io' show Platform;
+import 'dart:math' as math;
 
 import 'package:conduit/shared/widgets/platform_ui/platform_ui.dart';
 import 'package:material_ui/material_ui.dart';
@@ -51,6 +52,7 @@ Future<void> showHermesJobsSheet(BuildContext context) async {
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
+    useRootNavigator: true,
     constraints: BoxConstraints(
       maxHeight: MediaQuery.sizeOf(context).height * 0.78,
     ),
@@ -235,84 +237,103 @@ class HermesJobsSheet extends ConsumerWidget {
     final theme = context.conduitTheme;
     final l10n = AppLocalizations.of(context) ?? AppLocalizationsEn();
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Spacing.lg,
-            Spacing.xs,
-            Spacing.sm,
-            Spacing.md,
-          ),
-          child: Row(
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // ConduitModalSheetSurface embeds its child in a Column(mainAxisSize: min)
+        // when showHandle is true, leaving incoming vertical constraints unbounded.
+        // A bounded height is required so the inner Column's Expanded child can flex.
+        const handleHeight = Spacing.sm + 4 + Spacing.md;
+        final fallbackHeight = math.max(
+          200.0,
+          (MediaQuery.sizeOf(context).height * 0.78) - handleHeight,
+        );
+        final height = constraints.hasBoundedHeight
+            ? constraints.maxHeight
+            : fallbackHeight;
+
+        return SizedBox(
+          height: height,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                  Spacing.lg,
+                  Spacing.xs,
+                  Spacing.sm,
+                  Spacing.md,
+                ),
+                child: Row(
                   children: [
-                    Text(
-                      l10n.hermesScheduledAgentsTitle,
-                      style: AppTypography.titleMediumStyle.copyWith(
-                        color: theme.textPrimary,
-                        fontWeight: FontWeight.w700,
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            l10n.hermesScheduledAgentsTitle,
+                            style: AppTypography.titleMediumStyle.copyWith(
+                              color: theme.textPrimary,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                          const SizedBox(height: Spacing.xxs),
+                          Text(
+                            l10n.hermesJobsSheetSubtitle,
+                            style: AppTypography.bodySmallStyle.copyWith(
+                              color: theme.textSecondary,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    const SizedBox(height: Spacing.xxs),
-                    Text(
-                      l10n.hermesJobsSheetSubtitle,
-                      style: AppTypography.bodySmallStyle.copyWith(
-                        color: theme.textSecondary,
-                      ),
+                    ConduitTextButton(
+                      onPressed: () =>
+                          Navigator.of(context).pop(_HermesJobsSheetAction.manage),
+                      text: l10n.manage,
+                      isPrimary: true,
                     ),
                   ],
                 ),
               ),
-              ConduitTextButton(
-                onPressed: () =>
-                    Navigator.of(context).pop(_HermesJobsSheetAction.manage),
-                text: l10n.manage,
-                isPrimary: true,
-              ),
-            ],
-          ),
-        ),
-        Divider(height: 1, color: theme.cardBorder),
-        Expanded(
-          child: jobsAsync.when(
-            skipLoadingOnRefresh: true,
-            data: (jobs) {
-              if (jobs.isEmpty) return const _JobsEmptyState();
-              return ListView.separated(
-                padding: const EdgeInsets.symmetric(vertical: Spacing.sm),
-                itemCount: jobs.length,
-                separatorBuilder: (_, _) => Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: Spacing.lg),
-                  child: Divider(height: 1, color: theme.cardBorder),
-                ),
-                itemBuilder: (_, index) => _HermesJobSheetRow(
-                  key: ValueKey<String>('hermes-job-sheet-${jobs[index].id}'),
-                  job: jobs[index],
-                  writable: writable,
-                ),
-              );
-            },
-            loading: () => const Center(child: AdaptiveProgressIndicator()),
-            error: (_, _) => Center(
-              child: Padding(
-                padding: const EdgeInsets.all(Spacing.xl),
-                child: Text(
-                  l10n.hermesJobLoadFailed,
-                  textAlign: TextAlign.center,
-                  style: AppTypography.bodySmallStyle.copyWith(
-                    color: theme.error,
+              Divider(height: 1, color: theme.cardBorder),
+              Expanded(
+                child: jobsAsync.when(
+                  skipLoadingOnRefresh: true,
+                  data: (jobs) {
+                    if (jobs.isEmpty) return const _JobsEmptyState();
+                    return ListView.separated(
+                      padding: const EdgeInsets.symmetric(vertical: Spacing.sm),
+                      itemCount: jobs.length,
+                      separatorBuilder: (_, _) => Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: Spacing.lg),
+                        child: Divider(height: 1, color: theme.cardBorder),
+                      ),
+                      itemBuilder: (_, index) => _HermesJobSheetRow(
+                        key: ValueKey<String>('hermes-job-sheet-${jobs[index].id}'),
+                        job: jobs[index],
+                        writable: writable,
+                      ),
+                    );
+                  },
+                  loading: () => const Center(child: AdaptiveProgressIndicator()),
+                  error: (_, _) => Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(Spacing.xl),
+                      child: Text(
+                        l10n.hermesJobLoadFailed,
+                        textAlign: TextAlign.center,
+                        style: AppTypography.bodySmallStyle.copyWith(
+                          color: theme.error,
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ),
-            ),
+            ],
           ),
-        ),
-      ],
+        );
+      },
     );
   }
 }

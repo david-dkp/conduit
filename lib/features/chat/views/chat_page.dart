@@ -1004,16 +1004,27 @@ class _ChatPageState extends ConsumerState<ChatPage> {
     String text,
     List<Model> models,
     void Function(ChatSendPlaceholderHandle) onPrepared,
-  ) async {
-    ChatSendPlaceholderHandle? committed;
-    final result = await _sendMessage(
-      text,
-      includeComposerContext: true,
-      compareModels: models,
-      onSendPrepared: onPrepared,
-      onComparisonCommitted: (handle) => committed = handle,
+  ) {
+    final committed = Completer<ChatSendPlaceholderHandle?>();
+    unawaited(
+      _sendMessage(
+        text,
+        includeComposerContext: true,
+        compareModels: models,
+        onSendPrepared: onPrepared,
+        onComparisonCommitted: (handle) {
+          if (!committed.isCompleted) committed.complete(handle);
+        },
+      ).then(
+        (_) {
+          if (!committed.isCompleted) committed.complete(null);
+        },
+        onError: (Object error, StackTrace stack) {
+          if (!committed.isCompleted) committed.completeError(error, stack);
+        },
+      ),
     );
-    return result.dispatched ? committed : null;
+    return committed.future;
   }
 
   Future<void> _refreshDesktopHermesTranscript(String storedId) async {
@@ -1359,21 +1370,55 @@ class _ChatPageState extends ConsumerState<ChatPage> {
           !ref.read(temporaryChatEnabledProvider) &&
           !isTemporaryChat(ref.read(activeConversationProvider)?.id);
 
+      var attachmentsRetired = false;
+      void retireAttachments() {
+        if (!includeComposerContext || attachmentsRetired) return;
+        attachmentsRetired = true;
+        unawaited(
+          mediaUploadController
+              .retireAttachmentOwnership(sentAttachmentOwnership)
+              .catchError((Object error, StackTrace stackTrace) {
+                DebugLogger.error(
+                  'sent-attachment-cleanup-failed',
+                  scope: 'chat/attachment',
+                  error: error,
+                  stackTrace: stackTrace,
+                );
+              }),
+        );
+      }
+
       // Durable send: persists rows + outbox op in one tx (survives a
       // force-quit) and drives streaming via the requestCompletion op.
       if (compareModels != null) {
         // One admission for every model: the answers are siblings of the same
         // user message, so the first one anchors the turn's position.
+        ChatSendPlaceholderHandle? primaryHandle;
+        var comparisonAdmissionConfirmed = false;
         final handles = await durableCompareSend(
           ref,
           text,
           uploadedFileIds.isNotEmpty ? uploadedFileIds : null,
           models: compareModels,
-          onAssistantPlaceholderCreated: onSendPrepared,
+          onAssistantPlaceholderCreated: (handle) {
+            didDispatch = true;
+            primaryHandle = handle;
+            onSendPrepared?.call(handle);
+          },
+          onCommitted: () {
+            if (primaryHandle != null) {
+              comparisonAdmissionConfirmed = true;
+              _releaseMessageSendAdmission(sendOwner);
+              retireAttachments();
+              onComparisonCommitted?.call(primaryHandle!);
+            }
+          },
           toolIds: toolIds.isNotEmpty ? toolIds : null,
         );
         pendingSends = handles;
-        onComparisonCommitted?.call(handles.first);
+        if (!comparisonAdmissionConfirmed && handles.isNotEmpty) {
+          onComparisonCommitted?.call(handles.first);
+        }
         _releaseMessageSendAdmission(sendOwner);
         _activatePinToTopAnchor(
           handles.first,
@@ -1400,10 +1445,16 @@ class _ChatPageState extends ConsumerState<ChatPage> {
               handle,
               settleImmediately: settlePinImmediately,
             );
+            if (!usesOutbox && onDraftCommitted != null) {
+              admissionConfirmed = true;
+              retireAttachments();
+              onDraftCommitted(handle);
+            }
           },
           onAdmissionCommitted: usesOutbox && onDraftCommitted != null
               ? (_) {
                   admissionConfirmed = true;
+                  retireAttachments();
                   onDraftCommitted(pendingSend!);
                 }
               : null,
@@ -1415,25 +1466,7 @@ class _ChatPageState extends ConsumerState<ChatPage> {
         }
       }
       didDispatch = true;
-
-      // Clear only after durableSend has transferred every attachment needed
-      // by the message/outbox. Retire only the exact identities/generations
-      // captured for this send: a paste or picker result published while the
-      // durable transaction awaited still belongs to the next composer turn.
-      if (includeComposerContext) {
-        unawaited(
-          mediaUploadController
-              .retireAttachmentOwnership(sentAttachmentOwnership)
-              .catchError((Object error, StackTrace stackTrace) {
-                DebugLogger.error(
-                  'sent-attachment-cleanup-failed',
-                  scope: 'chat/attachment',
-                  error: error,
-                  stackTrace: stackTrace,
-                );
-              }),
-        );
-      }
+      retireAttachments();
 
       if (wasOffline && hasDurableOutbox && mounted) {
         AdaptiveSnackBar.show(

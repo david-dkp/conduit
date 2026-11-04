@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:conduit/features/chat/views/chat_page.dart';
@@ -25,6 +26,7 @@ import 'package:conduit_core/models/tool.dart';
 import 'package:conduit_core/models/user.dart';
 import 'package:conduit_core/providers/app_providers.dart';
 import 'package:conduit_core/services/api_service.dart';
+import 'package:conduit_core/services/chat_completion_transport.dart';
 import 'package:conduit_core/services/connectivity_service.dart'
     show isOnlineProvider;
 import 'package:conduit_core/services/optimized_storage_service.dart';
@@ -75,6 +77,8 @@ void main() {
     AppDatabase? db,
     bool ordinarySend = false,
     bool holdDrain = false,
+    bool temporaryChat = false,
+    bool holdStream = false,
   }) async {
     final originalErrorWidgetBuilder = ErrorWidget.builder;
     final originalFlutterErrorOnError = FlutterError.onError;
@@ -110,6 +114,7 @@ void main() {
               url: 'https://page.example.test',
             ),
             workerManager: WorkerManager(),
+            holdStream: holdStream,
           ),
         ),
         // Without a database a durable comparison cannot be admitted, so the
@@ -118,6 +123,9 @@ void main() {
         syncEngineProvider.overrideWith(() => _NoDrainEngine(hold: holdDrain)),
         isAuthenticatedProvider2.overrideWithValue(true),
         reviewerModeProvider.overrideWithValue(false),
+        temporaryChatEnabledProvider.overrideWith(
+          temporaryChat ? _IsTemporary.new : _NotTemporary.new,
+        ),
         selectedModelProvider.overrideWith(_Selected.new),
         activeConversationProvider.overrideWith(() => _Active(chat)),
         chatMessagesProvider.overrideWith(_Messages.new),
@@ -274,6 +282,101 @@ void main() {
       }
     },
   );
+
+  testWidgets(
+    'comparison admission clears its draft before the network drain completes',
+    (tester) async {
+      final db = AppDatabase(NativeDatabase.memory());
+      await tester.runAsync(
+        () => db
+            .into(db.chats)
+            .insert(
+              ChatsCompanion.insert(
+                id: 'stored-chat',
+                title: 'A chat',
+                createdAt: 1,
+                updatedAt: 1,
+                bodySynced: const Value(true),
+              ),
+            ),
+      );
+      final container = await compareOnPage(
+        tester,
+        db: db,
+        ordinarySend: false,
+        holdDrain: true,
+      );
+      final engine =
+          container.read(syncEngineProvider.notifier) as _NoDrainEngine;
+      try {
+        final elapsed = Stopwatch()..start();
+        while (composerText(tester).isNotEmpty &&
+            elapsed.elapsed < const Duration(seconds: 10)) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 1)),
+          );
+          await tester.pump(const Duration(milliseconds: 1));
+        }
+        expect(composerText(tester), isEmpty);
+        expect(engine.gate.isCompleted, isFalse);
+        expect(
+          container.read(chatMessagesProvider).map((message) => message.role),
+          ['user', 'assistant', 'assistant'],
+        );
+      } finally {
+        engine.gate.complete();
+        await settle(tester);
+        container.read(chatMessagesProvider.notifier)
+          ..clearMessages()
+          ..finishStreaming();
+      }
+    },
+  );
+
+  testWidgets(
+    'inline send clears its draft immediately when placeholder is created before streaming finishes',
+    (tester) async {
+      final container = await compareOnPage(
+        tester,
+        ordinarySend: true,
+        temporaryChat: true,
+        holdStream: true,
+      );
+      final api = container.read(apiServiceProvider) as _QuietApi;
+      try {
+        final elapsed = Stopwatch()..start();
+        while (composerText(tester).isNotEmpty &&
+            elapsed.elapsed < const Duration(seconds: 10)) {
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 1)),
+          );
+          await tester.pump(const Duration(milliseconds: 1));
+        }
+        expect(composerText(tester), isEmpty);
+        expect(api.streamGate.isCompleted, isFalse);
+        expect(
+          container.read(chatMessagesProvider).map((message) => message.role),
+          ['user', 'assistant'],
+        );
+      } finally {
+        api.streamGate.complete();
+        await settle(tester);
+        container.read(chatMessagesProvider.notifier)
+          ..clearMessages()
+          ..finishStreaming();
+      }
+    },
+  );
+}
+
+final class _NotTemporary extends TemporaryChatEnabled {
+  @override
+  bool build() => false;
+}
+
+final class _IsTemporary extends TemporaryChatEnabled {
+  @override
+  bool build() => true;
 }
 
 class _Conversations extends Conversations {
@@ -340,11 +443,66 @@ class _NoProfiles extends DirectConnectionProfilesController {
 
 /// Answers the settings read an admission makes, without a network.
 class _QuietApi extends ApiService {
-  _QuietApi({required super.serverConfig, required super.workerManager});
+  _QuietApi({
+    required super.serverConfig,
+    required super.workerManager,
+    this.holdStream = false,
+  });
+
+  final bool holdStream;
+  final streamGate = Completer<void>();
 
   @override
   Future<Map<String, dynamic>> getUserSettings({Object? authSnapshot}) async =>
       const <String, dynamic>{};
+
+  @override
+  Future<ChatCompletionSession> sendMessageSession({
+    required List<Map<String, dynamic>> messages,
+    required String model,
+    String? conversationId,
+    String? terminalId,
+    List<String>? toolIds,
+    List<String>? filterIds,
+    List<String>? skillIds,
+    bool enableWebSearch = false,
+    bool enableImageGeneration = false,
+    bool enableCodeInterpreter = false,
+    bool isVoiceMode = false,
+    Map<String, dynamic>? modelItem,
+    String? sessionIdOverride,
+    List<Map<String, dynamic>>? toolServers,
+    Map<String, dynamic>? backgroundTasks,
+    String? responseMessageId,
+    Map<String, dynamic>? userSettings,
+    Map<String, dynamic>? globalParams,
+    Map<String, dynamic>? chatParams,
+    String? reasoningEffort,
+    String? parentId,
+    Map<String, dynamic>? userMessage,
+    Map<String, dynamic>? variables,
+    List<Map<String, dynamic>>? files,
+    List<ChatCompletionTarget>? messageIds,
+  }) async {
+    final controller = StreamController<List<int>>();
+    if (holdStream) {
+      unawaited(
+        streamGate.future.then((_) {
+          controller.add(utf8.encode('data: [DONE]\n\n'));
+          controller.close();
+        }),
+      );
+    } else {
+      controller.add(utf8.encode('data: [DONE]\n\n'));
+      unawaited(controller.close());
+    }
+    return ChatCompletionSession.httpStream(
+      messageId: responseMessageId ?? 'test-msg',
+      conversationId: conversationId,
+      byteStream: controller.stream,
+      abort: () async => controller.close(),
+    );
+  }
 }
 
 /// A server drain that sends nothing: the turn stays exactly as admitted.

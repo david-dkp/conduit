@@ -191,14 +191,54 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
               'mcp.setup.request' => HermesDecisionKind.mcpSetup,
               _ => HermesDecisionKind.clarification,
             };
-            final prompt = switch (event.type) {
-              'clarify.request' => value('question'),
-              'secret.request' =>
-                value('prompt').isEmpty ? value('env_var') : value('prompt'),
-              'mcp.setup.request' =>
-                value('reason').isEmpty ? value('server') : value('reason'),
-              _ => value('prompt'),
-            };
+            final String prompt;
+            final List<String> choices;
+            final bool multiSelect;
+            String? qid;
+
+            if (kind == HermesDecisionKind.clarification &&
+                payload['questions'] is List &&
+                (payload['questions'] as List).isNotEmpty) {
+              final questions =
+                  (payload['questions'] as List).whereType<Map>().toList();
+              if (questions.length == 1) {
+                final q = questions.first;
+                prompt = q['question']?.toString() ?? value('question');
+                choices = _desktopDecisionChoices(q['choices']);
+                multiSelect = q['multi_select'] == true;
+                qid = q['qid']?.toString();
+              } else {
+                final buffer = StringBuffer();
+                for (var i = 0; i < questions.length; i++) {
+                  final q = questions[i];
+                  buffer.writeln('${i + 1}. ${q['question']}');
+                  final qChoices = _desktopDecisionChoices(q['choices']);
+                  if (qChoices.isNotEmpty) {
+                    buffer.writeln('   • ${qChoices.join(' / ')}');
+                  }
+                }
+                prompt = buffer.toString().trim();
+                choices = _desktopDecisionChoices(questions.first['choices']);
+                multiSelect = false;
+                qid = questions.first['qid']?.toString();
+              }
+            } else {
+              prompt = switch (event.type) {
+                'clarify.request' => value('question'),
+                'secret.request' =>
+                  value('prompt').isEmpty ? value('env_var') : value('prompt'),
+                'mcp.setup.request' =>
+                  value('reason').isEmpty ? value('server') : value('reason'),
+                _ => value('prompt'),
+              };
+              choices = kind == HermesDecisionKind.clarification
+                  ? _desktopDecisionChoices(payload['choices'])
+                  : const <String>[];
+              multiSelect =
+                  kind == HermesDecisionKind.clarification &&
+                  payload['multi_select'] == true;
+              qid = payload['qid']?.toString();
+            }
             unawaited(
               _rememberPendingDecision(
                 binding,
@@ -220,12 +260,9 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
                 mcpAction: kind == HermesDecisionKind.mcpSetup
                     ? value('action')
                     : null,
-                choices: kind == HermesDecisionKind.clarification
-                    ? _desktopDecisionChoices(payload['choices'])
-                    : const <String>[],
-                multiSelect:
-                    kind == HermesDecisionKind.clarification &&
-                    payload['multi_select'] == true,
+                choices: choices,
+                multiSelect: multiSelect,
+                qid: qid,
               ),
             );
             controller.add(
@@ -233,7 +270,12 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
                 kind: kind,
                 requestId: requestId,
                 prompt: prompt,
-                raw: payload,
+                raw: {
+                  ...payload,
+                  if (choices.isNotEmpty) 'choices': choices,
+                  'multi_select': multiSelect,
+                  if (qid != null) 'qid': qid,
+                },
               ),
             );
           }
@@ -243,6 +285,7 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
         case 'sudo.expire':
         case 'secret.expire':
         case 'mcp.setup.expire':
+        case 'request.cancel':
           final requestId = validateHermesOpaqueIdentifier(
             payload['request_id'] ?? payload['id'],
           );
@@ -520,14 +563,51 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
       _ => null,
     };
     if (kind == null) return;
-    final prompt = switch (event.type) {
-      'approval.request' =>
-        event.payload['command'] ?? event.payload['description'],
-      'clarify.request' => event.payload['question'],
-      'secret.request' => event.payload['prompt'] ?? event.payload['env_var'],
-      'mcp.setup.request' => event.payload['reason'] ?? event.payload['server'],
-      _ => event.payload['prompt'],
-    };
+    final String? prompt;
+    String? qid = event.payload['qid']?.toString();
+    List<String> choices = _desktopDecisionChoices(event.payload['choices']);
+    bool multiSelect = event.payload['multi_select'] == true;
+
+    if (kind == HermesPendingDesktopDecisionKind.clarification &&
+        event.payload['questions'] is List &&
+        (event.payload['questions'] as List).isNotEmpty) {
+      final questions =
+          (event.payload['questions'] as List).whereType<Map>().toList();
+      if (questions.length == 1) {
+        final q = questions.first;
+        prompt = q['question']?.toString() ?? event.payload['question']?.toString();
+        choices = _desktopDecisionChoices(q['choices']);
+        multiSelect = q['multi_select'] == true;
+        qid = q['qid']?.toString() ?? qid;
+      } else if (questions.isNotEmpty) {
+        final buffer = StringBuffer();
+        for (var i = 0; i < questions.length; i++) {
+          final q = questions[i];
+          buffer.writeln('${i + 1}. ${q['question']}');
+          final qChoices = _desktopDecisionChoices(q['choices']);
+          if (qChoices.isNotEmpty) {
+            buffer.writeln('   • ${qChoices.join(' / ')}');
+          }
+        }
+        prompt = buffer.toString().trim();
+        choices = _desktopDecisionChoices(questions.first['choices']);
+        multiSelect = false;
+        qid = questions.first['qid']?.toString() ?? qid;
+      } else {
+        prompt = event.payload['question']?.toString();
+      }
+    } else {
+      prompt = switch (event.type) {
+        'approval.request' =>
+          (event.payload['command'] ?? event.payload['description'])?.toString(),
+        'clarify.request' => event.payload['question']?.toString(),
+        'secret.request' =>
+          (event.payload['prompt'] ?? event.payload['env_var'])?.toString(),
+        'mcp.setup.request' =>
+          (event.payload['reason'] ?? event.payload['server'])?.toString(),
+        _ => event.payload['prompt']?.toString(),
+      };
+    }
     await HermesPendingDecisionStore.upsert(
       origin: _origin,
       connectionId: config.connectionId,
@@ -535,13 +615,14 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
       runtimeId: runtimeId,
       requestId: requestId,
       kind: kind,
-      prompt: prompt?.toString(),
+      prompt: prompt,
       mcpServer: event.payload['server']?.toString(),
       mcpAction: event.payload['action']?.toString(),
-      choices: _desktopDecisionChoices(event.payload['choices']),
-      multiSelect: event.payload['multi_select'] == true,
+      choices: choices,
+      multiSelect: multiSelect,
       sensitiveValues: config.sensitiveValues,
       profile: _sessionProfiles[storedId],
+      qid: qid,
     );
   }
 
@@ -554,6 +635,7 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
     String? mcpAction,
     Iterable<Object?> choices = const <Object?>[],
     bool multiSelect = false,
+    String? qid,
   }) => HermesPendingDecisionStore.upsert(
     origin: _origin,
     connectionId: config.connectionId,
@@ -568,6 +650,7 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
     multiSelect: multiSelect,
     sensitiveValues: config.sensitiveValues,
     profile: _sessionProfiles[binding.storedId],
+    qid: qid,
   );
 
   Future<void> _applySessionOptions(
@@ -971,15 +1054,23 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
       throw ArgumentError.value(choice, 'choice');
     }
     await _ensureConnected();
-    await _rpc.request<Object?>(
-      'approval.respond',
-      params: {
-        'session_id': runId,
-        'request_id': approvalId,
-        'choice': choice,
-        ..._runtimeScope(runId),
-      },
+    _rpc.respond(
+      approvalId,
+      result: {'choice': choice},
     );
+    try {
+      await _rpc.request<Object?>(
+        'approval.respond',
+        params: {
+          'session_id': runId,
+          'request_id': approvalId,
+          'choice': choice,
+          ..._runtimeScope(runId),
+        },
+      );
+    } catch (_) {
+      // Direct response frame settled the server request if supported.
+    }
     await HermesPendingDecisionStore.resolve(
       origin: _origin,
       connectionId: config.connectionId,
@@ -1024,27 +1115,90 @@ extension _HermesDesktopTurnRuntime on HermesDesktopApiService {
       );
       return;
     }
-    final method = switch (kind) {
-      HermesDecisionKind.clarification => 'clarify.respond',
-      HermesDecisionKind.sudo => 'sudo.respond',
-      HermesDecisionKind.secret => 'secret.respond',
-      HermesDecisionKind.mcpSetup => throw StateError('unreachable'),
-    };
-    final valueKey = switch (kind) {
-      HermesDecisionKind.clarification => 'answer',
-      HermesDecisionKind.sudo => 'password',
-      HermesDecisionKind.secret => 'value',
-      HermesDecisionKind.mcpSetup => throw StateError('unreachable'),
-    };
-    await _rpc.request<Object?>(
-      method,
-      params: {
-        'session_id': runtimeId,
-        'request_id': requestId,
-        valueKey: value,
-        ..._runtimeScope(runtimeId),
-      },
-    );
+    if (kind == HermesDecisionKind.clarification) {
+      final decisions = await HermesPendingDecisionStore.forSession(
+        origin: _origin,
+        storedSessionId: storedSessionId ?? runtimeId,
+        connectionId: config.connectionId,
+      );
+      final pending =
+          decisions.where((d) => d.requestId == requestId).firstOrNull;
+      final qid = pending?.qid ?? 'q_0';
+      final outcome = value.trim().isEmpty ? 'cancelled' : 'submitted';
+      final answers = <String, dynamic>{qid: value};
+
+      // 1. Direct JSON-RPC response frame on the socket
+      _rpc.respond(
+        requestId,
+        result: {'answers': answers, 'outcome': outcome},
+      );
+
+      // 2. Canonical request.answer RPC
+      try {
+        await _rpc.request<Object?>(
+          'request.answer',
+          params: {
+            'id': requestId,
+            'result': {'answers': answers, 'outcome': outcome},
+            ..._runtimeScope(runtimeId),
+          },
+        );
+      } catch (_) {
+        // Fallback for older Hermes versions
+        try {
+          await _rpc.request<Object?>(
+            'clarify.lock',
+            params: {
+              'request_id': requestId,
+              'question_id': qid,
+              'answer': value,
+              ..._runtimeScope(runtimeId),
+            },
+          );
+        } catch (_) {
+          await _rpc.request<Object?>(
+            'clarify.respond',
+            params: {
+              'session_id': runtimeId,
+              'request_id': requestId,
+              'answer': value,
+              ..._runtimeScope(runtimeId),
+            },
+          );
+        }
+      }
+    } else {
+      final valueKey =
+          kind == HermesDecisionKind.sudo ? 'password' : 'value';
+
+      _rpc.respond(
+        requestId,
+        result: {'value': value},
+      );
+
+      try {
+        await _rpc.request<Object?>(
+          'request.answer',
+          params: {
+            'id': requestId,
+            'result': {'value': value},
+            ..._runtimeScope(runtimeId),
+          },
+        );
+      } catch (_) {
+        final method =
+            kind == HermesDecisionKind.sudo ? 'sudo.respond' : 'secret.respond';
+        await _rpc.request<Object?>(
+          method,
+          params: {
+            'session_id': runtimeId,
+            'request_id': requestId,
+            valueKey: value,
+            ..._runtimeScope(runtimeId),
+          },
+        );
+      }
+    }
     await HermesPendingDecisionStore.resolve(
       origin: _origin,
       connectionId: config.connectionId,

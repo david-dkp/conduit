@@ -535,6 +535,96 @@ void main() {
     },
   );
 
+  test(
+    'routes server clarify requests to events and responds directly',
+    () async {
+      final socket = _SocketHarness();
+      final client = HermesDesktopRpcClient(
+        channelFactory: (_, _, {httpClient}) => socket.channel,
+      );
+      addTearDown(() async {
+        await client.close();
+        await socket.dispose();
+      });
+      final connecting = client.connect(Uri.parse('ws://localhost/api/ws'));
+      socket.ready();
+      await connecting;
+
+      final events = <HermesDesktopEvent>[];
+      client.events.listen(events.add);
+
+      socket.incoming.add(
+        jsonEncode({
+          'jsonrpc': '2.0',
+          'id': 'srq-123456789abc',
+          'method': 'clarify',
+          'params': {
+            'session_id': 'session-42',
+            'questions': [
+              {
+                'qid': 'q_0',
+                'question': 'Which database?',
+                'choices': ['Postgres', 'MongoDB'],
+                'multi_select': false,
+              },
+            ],
+          },
+        }),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      check(events).length.equals(1);
+      final event = events.single;
+      check(event.type).equals('clarify.request');
+      check(event.sessionId).equals('session-42');
+      check(event.payload['id']).equals('srq-123456789abc');
+      check(event.payload['question']).equals('Which database?');
+      check(event.payload['qid']).equals('q_0');
+
+      client.respond(
+        'srq-123456789abc',
+        result: {
+          'answers': {'q_0': 'Postgres'},
+          'outcome': 'submitted',
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final response = socket.sentFrame(0);
+      check(response['jsonrpc']).equals('2.0');
+      check(response['id']).equals('srq-123456789abc');
+      check(response['result'] as Map).deepEquals({
+        'answers': {'q_0': 'Postgres'},
+        'outcome': 'submitted',
+      });
+    },
+  );
+
+  test(
+    'advertises capabilities without injecting default parameters',
+    () async {
+      final socket = _SocketHarness();
+      final client = HermesDesktopRpcClient(
+        channelFactory: (_, _, {httpClient}) => socket.channel,
+      );
+      client.setDefaultParams({'profile': 'my-profile'});
+      addTearDown(() async {
+        await client.close();
+        await socket.dispose();
+      });
+      final connecting = client.connect(Uri.parse('ws://localhost/api/ws'));
+      socket.ready();
+      await connecting;
+
+      unawaited(client.advertiseCapabilities());
+      await Future<void>.delayed(Duration.zero);
+
+      final frame = socket.sentFrame(0);
+      check(frame['method']).equals('client.capabilities');
+      check(frame['params'] as Map).deepEquals({'server_requests': true});
+    },
+  );
+
   test('times out requests and rejects pending work on disconnect', () async {
     final socket = _SocketHarness();
     final client = HermesDesktopRpcClient(
